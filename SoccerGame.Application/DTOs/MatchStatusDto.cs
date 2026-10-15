@@ -4,6 +4,8 @@ using System.Text;
 
 namespace SoccerGame.Application.DTOs;
 
+public record PlayerDto(Guid Id, string Name, int ShirtNumber, float X, float Y, bool IsHomeTeam);
+
 public record MatchStatusDto(
     Guid MatchId,
     string HomeTeamName,
@@ -13,5 +15,6 @@ public record MatchStatusDto(
     string State,
     float ElapsedTimeInSeconds,
     float BallX,
-    float BallY
+    float BallY,
+    IReadOnlyCollection<PlayerDto> Players
 );

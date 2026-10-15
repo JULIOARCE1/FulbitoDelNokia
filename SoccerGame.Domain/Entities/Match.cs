@@ -28,6 +28,10 @@ public class Match
     public float ElapsedTimeInSeconds { get; private set; }
     public float DurationInSeconds { get; }
 
+    // Definición conceptual del campo (ancho: 700, alto: 500)
+    public float PitchWidth { get; } = 700f;
+    public float PitchHeight { get; } = 500f;
+
     public Match(Guid id, Team homeTeam, Team awayTeam, Ball ball, float durationInSeconds = 180f)
     {
         ArgumentNullException.ThrowIfNull(homeTeam);
@@ -62,6 +66,8 @@ public class Match
         ElapsedTimeInSeconds += deltaTime;
         Ball.UpdatePosition(deltaTime);
 
+        CheckGoalConditions();
+
         if (ElapsedTimeInSeconds >= DurationInSeconds)
         {
             ElapsedTimeInSeconds = DurationInSeconds;
@@ -69,10 +75,34 @@ public class Match
         }
     }
 
+    private void CheckGoalConditions()
+    {
+        float halfWidth = PitchWidth / 2f;
+        float halfGoalHeight = 60f; // Alto del arco
+
+        // Gol del equipo visitante (Arco izquierdo)
+        if (Ball.Position.X < -halfWidth && MathF.Abs(Ball.Position.Y) < halfGoalHeight)
+        {
+            ScoreGoalForAwayTeam();
+            ResetPositionsAfterGoal();
+        }
+        // Gol del equipo local (Arco derecho)
+        else if (Ball.Position.X > halfWidth && MathF.Abs(Ball.Position.Y) < halfGoalHeight)
+        {
+            ScoreGoalForHomeTeam();
+            ResetPositionsAfterGoal();
+        }
+    }
+
+    private void ResetPositionsAfterGoal()
+    {
+        Ball.SetPosition(Position.Zero);
+        Ball.Stop();
+    }
+
     public void ScoreGoalForHomeTeam()
     {
-        if (State != MatchState.InPlay)
-            throw new InvalidOperationException("Solo se pueden anotar goles con el partido en juego.");
+        if (State != MatchState.InPlay) return;
 
         Score = Score.IncrementHome();
         State = MatchState.GoalScored;
@@ -80,8 +110,7 @@ public class Match
 
     public void ScoreGoalForAwayTeam()
     {
-        if (State != MatchState.InPlay)
-            throw new InvalidOperationException("Solo se pueden anotar goles con el partido en juego.");
+        if (State != MatchState.InPlay) return;
 
         Score = Score.IncrementAway();
         State = MatchState.GoalScored;
