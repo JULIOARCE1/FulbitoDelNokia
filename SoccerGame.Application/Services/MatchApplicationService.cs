@@ -27,13 +27,15 @@ public class MatchApplicationService
         var home = new Team(Guid.NewGuid(), homeTeamName);
         var away = new Team(Guid.NewGuid(), awayTeamName);
 
+        // Alineación Local (3 jugadores)
         home.AddPlayer(new Player(Guid.NewGuid(), "Delantero H", 9, new Position(-50f, 0f), PlayerStats.Default));
-        home.AddPlayer(new Player(Guid.NewGuid(), "Medio H", 8, new Position(-150f, -50f), PlayerStats.Default));
-        home.AddPlayer(new Player(Guid.NewGuid(), "Defensa H", 2, new Position(-250f, 50f), PlayerStats.Default));
+        home.AddPlayer(new Player(Guid.NewGuid(), "Medio H", 8, new Position(-150f, -60f), PlayerStats.Default));
+        home.AddPlayer(new Player(Guid.NewGuid(), "Defensa H", 2, new Position(-250f, 60f), PlayerStats.Default));
 
+        // Alineación Visitante (3 jugadores)
         away.AddPlayer(new Player(Guid.NewGuid(), "Delantero A", 11, new Position(50f, 0f), PlayerStats.Default));
-        away.AddPlayer(new Player(Guid.NewGuid(), "Medio A", 10, new Position(150f, 50f), PlayerStats.Default));
-        away.AddPlayer(new Player(Guid.NewGuid(), "Defensa A", 3, new Position(250f, -50f), PlayerStats.Default));
+        away.AddPlayer(new Player(Guid.NewGuid(), "Medio A", 10, new Position(150f, 60f), PlayerStats.Default));
+        away.AddPlayer(new Player(Guid.NewGuid(), "Defensa A", 3, new Position(250f, -60f), PlayerStats.Default));
 
         var ball = new Ball(Position.Zero);
         var match = new Match(Guid.NewGuid(), home, away, ball, durationSeconds);
@@ -61,13 +63,20 @@ public class MatchApplicationService
 
         match.UpdateTick(command.SanitizedDeltaTime);
 
-        // Disparar sonido si hubo un gol
+        if (match.State == MatchState.InPlay)
+        {
+            // --- A. IA DEL EQUIPO RIVAL (VISITANTE) ---
+            UpdateEnemyAI(match, command.SanitizedDeltaTime);
+
+            // --- B. COLISIÓN Y POSESIÓN JUGADOR-PELOTA ---
+            CheckPlayerBallCollisions(match);
+        }
+
         if (previousState == MatchState.InPlay && match.State == MatchState.GoalScored)
         {
             _soundService?.PlayGoalWhistleSound();
         }
 
-        // Guardar resultado si terminó el partido
         if (previousState == MatchState.InPlay && match.State == MatchState.Finished)
         {
             _soundService?.PlayStartWhistleSound();
@@ -75,6 +84,65 @@ public class MatchApplicationService
             if (status != null && _matchRepository != null)
             {
                 _ = _matchRepository.SaveMatchHistoryAsync(status);
+            }
+        }
+    }
+
+    private void UpdateEnemyAI(Match match, float deltaTime)
+    {
+        // El jugador visitante más cercano a la pelota toma la iniciativa
+        var closestEnemy = match.AwayTeam.Players
+            .OrderBy(p => p.Position.DistanceTo(match.Ball.Position))
+            .FirstOrDefault();
+
+        if (closestEnemy is null) return;
+
+        float distToBall = closestEnemy.Position.DistanceTo(match.Ball.Position);
+
+        // Si está lejos de la pelota, va directo hacia ella
+        if (distToBall > 15f)
+        {
+            float dx = match.Ball.Position.X - closestEnemy.Position.X;
+            float dy = match.Ball.Position.Y - closestEnemy.Position.Y;
+            float length = MathF.Sqrt(dx * dx + dy * dy);
+
+            if (length > 0)
+            {
+                float dirX = dx / length;
+                float dirY = dy / length;
+                float speed = closestEnemy.Stats.Speed * 0.7f; // Ligeramente más lento que el jugador humano
+                closestEnemy.MoveTo(closestEnemy.Position.MoveBy(dirX * speed, dirY * speed));
+            }
+        }
+        else
+        {
+            // Si está al lado de la pelota, patea hacia el arco local (Arco izquierdo: X = -350)
+            float dx = -350f - match.Ball.Position.X;
+            float dy = 0f - match.Ball.Position.Y;
+            float length = MathF.Sqrt(dx * dx + dy * dy);
+
+            if (length > 0)
+            {
+                match.Ball.ApplyImpulse((dx / length) * 45f, (dy / length) * 45f);
+                _soundService?.PlayKickSound();
+            }
+        }
+    }
+
+    private void CheckPlayerBallCollisions(Match match)
+    {
+        // Si un jugador camina sobre la pelota en movimiento, la empuja/conduce levemente
+        foreach (var player in match.HomeTeam.Players.Concat(match.AwayTeam.Players))
+        {
+            float dist = player.Position.DistanceTo(match.Ball.Position);
+            if (dist < 12f)
+            {
+                // Conducción de pelota
+                float ballSpeed = MathF.Sqrt(match.Ball.Velocity.X * match.Ball.Velocity.X + match.Ball.Velocity.Y * match.Ball.Velocity.Y);
+                if (ballSpeed < 5f)
+                {
+                    match.Ball.SetPosition(player.Position.MoveBy(8f, 0f));
+                }
             }
         }
     }
