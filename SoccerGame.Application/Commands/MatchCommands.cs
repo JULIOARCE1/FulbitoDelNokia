@@ -21,4 +21,4 @@ public record MovePlayerCommand(Guid MatchId, Guid PlayerId, float DeltaX, float
     public float SanitizedDeltaY => float.IsNaN(DeltaY) || float.IsInfinity(DeltaY) ? 0f : Math.Clamp(DeltaY, -1f, 1f);
 }
 
-public record KickBallCommand(Guid MatchId, float DirectionX, float DirectionY, float Power);
+public record KickBallCommand(Guid MatchId, Guid? PlayerId, float DirectionX, float DirectionY, float Power);

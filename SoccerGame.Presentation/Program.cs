@@ -13,14 +13,14 @@ public static class Program
 
     public static void Main()
     {
-        Raylib.InitWindow(ScreenWidth, ScreenHeight, "Soccer Game Retro - Nokia Style (Físicas & IA)");
+        Raylib.InitWindow(ScreenWidth, ScreenHeight, "Soccer Game Retro - Nokia Style");
         Raylib.SetTargetFPS(60);
 
         var soundService = new RaylibSoundService();
         var matchRepository = new JsonMatchRepository();
         var matchService = new MatchApplicationService(soundService, matchRepository);
 
-        var matchId = matchService.CreateMatch("River Plate", "Boca Juniors", durationSeconds: 120f);
+        var matchId = matchService.CreateMatch("River Plate", "Boca Juniors", durationSeconds: 180f);
         matchService.StartMatch(new StartMatchCommand(matchId));
 
         while (!Raylib.WindowShouldClose())
@@ -28,11 +28,10 @@ public static class Program
             float deltaTime = Raylib.GetFrameTime();
             var status = matchService.GetMatchStatus(matchId);
 
-            if (status != null && status.Players.Any())
+            if (status != null && status.State == "InPlay" && status.Players.Any())
             {
-                // SELECCIÓN DINÁMICA: Selecciona automáticamente el jugador local más cercano a la pelota
                 var controlledPlayer = status.Players
-                    .Where(p => p.IsHomeTeam)
+                    .Where(p => p.IsHomeTeam && p.ShirtNumber != 1)
                     .OrderBy(p => MathF.Sqrt(MathF.Pow(p.X - status.BallX, 2) + MathF.Pow(p.Y - status.BallY, 2)))
                     .First();
 
@@ -49,13 +48,18 @@ public static class Program
                     matchService.MovePlayer(new MovePlayerCommand(matchId, controlledPlayer.Id, inputX, inputY));
                 }
 
-                // ESPACIO: Patear con dirección en base a lo que presiona el usuario
                 if (Raylib.IsKeyPressed(KeyboardKey.Space))
                 {
-                    float kickDirX = inputX != 0f ? inputX : 1f; // Si no presiona dirección, patea a la derecha
+                    float kickDirX = inputX != 0f ? inputX : 1f;
                     float kickDirY = inputY;
+                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, kickDirX, kickDirY, 65f));
+                }
 
-                    matchService.KickBall(new KickBallCommand(matchId, DirectionX: kickDirX, DirectionY: kickDirY, Power: 65f));
+                if (Raylib.IsKeyPressed(KeyboardKey.X))
+                {
+                    float passDirX = inputX != 0f ? inputX : 1f;
+                    float passDirY = inputY;
+                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, passDirX, passDirY, 35f));
                 }
             }
 
@@ -69,18 +73,15 @@ public static class Program
                 int centerX = ScreenWidth / 2;
                 int centerY = ScreenHeight / 2;
 
-                // Dibujar Cancha
                 Raylib.DrawRectangleLines(50, 50, ScreenWidth - 100, ScreenHeight - 100, Color.White);
                 Raylib.DrawLine(centerX, 50, centerX, ScreenHeight - 50, Color.White);
                 Raylib.DrawCircleLines(centerX, centerY, 60, Color.White);
 
-                // Arcos
                 Raylib.DrawRectangleLines(30, centerY - 60, 20, 120, Color.White);
                 Raylib.DrawRectangleLines(ScreenWidth - 50, centerY - 60, 20, 120, Color.White);
 
-                // Dibujar Jugadores
                 var activePlayer = status.Players
-                    .Where(p => p.IsHomeTeam)
+                    .Where(p => p.IsHomeTeam && p.ShirtNumber != 1)
                     .OrderBy(p => MathF.Sqrt(MathF.Pow(p.X - status.BallX, 2) + MathF.Pow(p.Y - status.BallY, 2)))
                     .FirstOrDefault();
 
@@ -88,9 +89,10 @@ public static class Program
                 {
                     int px = centerX + (int)player.X;
                     int py = centerY + (int)player.Y;
-                    Color teamColor = player.IsHomeTeam ? Color.Red : Color.Blue;
 
-                    // Dibujar cursor indicador sobre el jugador activo
+                    bool isGk = player.ShirtNumber == 1 || player.ShirtNumber == 12;
+                    Color teamColor = isGk ? Color.Orange : (player.IsHomeTeam ? Color.Red : Color.Blue);
+
                     if (activePlayer != null && player.Id == activePlayer.Id)
                     {
                         Raylib.DrawTriangle(
@@ -105,21 +107,24 @@ public static class Program
                     Raylib.DrawText(player.ShirtNumber.ToString(), px - 3, py - 4, 10, Color.White);
                 }
 
-                // Dibujar Pelota
                 int ballX = centerX + (int)status.BallX;
                 int ballY = centerY + (int)status.BallY;
                 Raylib.DrawCircle(ballX, ballY, 5, Color.White);
 
-                // HUD Retro
                 string scoreText = $"{status.HomeTeamName} {status.HomeGoals} - {status.AwayGoals} {status.AwayTeamName}";
-                string hudText = $"Tiempo: {(int)status.ElapsedTimeInSeconds}s | Flechas (Mover) - ESPACIO (Patear)";
+                string hudText = $"Tiempo: {(int)status.ElapsedTimeInSeconds}s | Flechas (Mover) - ESPACIO (Patear) - X (Pase)";
 
                 Raylib.DrawText(scoreText, centerX - Raylib.MeasureText(scoreText, 20) / 2, 15, 20, Color.Yellow);
-                Raylib.DrawText(hudText, 50, ScreenHeight - 35, 14, Color.RayWhite);
+                Raylib.DrawText(hudText, 30, ScreenHeight - 35, 14, Color.RayWhite);
 
                 if (status.State == "GoalScored")
                 {
                     Raylib.DrawText("¡¡¡ GOOOL !!!", centerX - 100, centerY - 20, 40, Color.Gold);
+                }
+
+                if (status.State == "Finished")
+                {
+                    Raylib.DrawText("PARTIDO FINALIZADO", centerX - 140, centerY - 20, 26, Color.Red);
                 }
             }
 

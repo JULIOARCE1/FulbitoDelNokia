@@ -88,63 +88,104 @@ public class MatchApplicationService
         }
     }
 
+    private const float BallControlDistance = 14f;
+    private const float StealDistance = 12f;
+
     private void UpdateEnemyAI(Match match, float deltaTime)
     {
-        // El jugador visitante más cercano a la pelota toma la iniciativa
-        var closestEnemy = match.AwayTeam.Players
-            .OrderBy(p => p.Position.DistanceTo(match.Ball.Position))
-            .FirstOrDefault();
+        var awayPlayers = match.AwayTeam.Players;
+        if (awayPlayers.Count == 0) return;
+        var possessor = FindPlayer(match, match.Ball.PossessorId);
 
-        if (closestEnemy is null) return;
-
-        float distToBall = closestEnemy.Position.DistanceTo(match.Ball.Position);
-
-        // Si está lejos de la pelota, va directo hacia ella
-        if (distToBall > 15f)
+        if (possessor != null && awayPlayers.Any(p => p.Id == possessor.Id))
         {
-            float dx = match.Ball.Position.X - closestEnemy.Position.X;
-            float dy = match.Ball.Position.Y - closestEnemy.Position.Y;
-            float length = MathF.Sqrt(dx * dx + dy * dy);
-
-            if (length > 0)
-            {
-                float dirX = dx / length;
-                float dirY = dy / length;
-                float speed = closestEnemy.Stats.Speed * 0.7f; // Ligeramente más lento que el jugador humano
-                closestEnemy.MoveTo(closestEnemy.Position.MoveBy(dirX * speed, dirY * speed));
-            }
+            var teammate = awayPlayers.Where(p => p.Id != possessor.Id && p.Position.X < possessor.Position.X - 35f)
+                .OrderBy(p => p.Position.DistanceTo(possessor.Position)).FirstOrDefault();
+            float distanceToGoal = MathF.Abs(possessor.Position.X + 350f);
+            if (distanceToGoal < 180f)
+                KickTowards(match, possessor, new Position(-350f, 0f), 55f);
+            else if (teammate != null && distanceToGoal > 220f && (int)(match.ElapsedTimeInSeconds * 2f) % 9 == 0 && deltaTime > 0f)
+                KickTowards(match, possessor, teammate.Position, 42f);
+            else
+                MoveTowards(match, possessor, new Position(-300f, 0f), deltaTime, 0.72f);
+            return;
         }
-        else
+
+        var closestEnemy = awayPlayers.OrderBy(p => p.Position.DistanceTo(match.Ball.Position)).First();
+        if (!match.Ball.PossessorId.HasValue && closestEnemy.Position.DistanceTo(match.Ball.Position) <= BallControlDistance && BallSpeed(match) < 22f)
         {
-            // Si está al lado de la pelota, patea hacia el arco local (Arco izquierdo: X = -350)
-            float dx = -350f - match.Ball.Position.X;
-            float dy = 0f - match.Ball.Position.Y;
-            float length = MathF.Sqrt(dx * dx + dy * dy);
-
-            if (length > 0)
-            {
-                match.Ball.ApplyImpulse((dx / length) * 45f, (dy / length) * 45f);
-                _soundService?.PlayKickSound();
-            }
+            match.Ball.GiveTo(closestEnemy.Id, BallPositionFor(closestEnemy, match));
+            return;
         }
+        MoveTowards(match, closestEnemy, match.Ball.Position, deltaTime, 0.72f);
+    }
+
+    private static void MoveTowards(Match match, Player player, Position target, float deltaTime, float speedFactor)
+    {
+        float dx = target.X - player.Position.X, dy = target.Y - player.Position.Y;
+        float length = MathF.Sqrt(dx * dx + dy * dy);
+        if (length <= 1f) return;
+        float distance = player.Stats.Speed * speedFactor * deltaTime;
+        player.MoveTo(ClampToPitch(match, player.Position.MoveBy(dx / length * distance, dy / length * distance)));
+    }
+
+    private void KickTowards(Match match, Player player, Position target, float power)
+    {
+        float dx = target.X - match.Ball.Position.X, dy = target.Y - match.Ball.Position.Y;
+        float length = MathF.Sqrt(dx * dx + dy * dy);
+        if (length <= 0f) return;
+        match.Ball.ApplyImpulse(dx / length * power, dy / length * power);
+        _soundService?.PlayKickSound();
     }
 
     private void CheckPlayerBallCollisions(Match match)
     {
-        // Si un jugador camina sobre la pelota en movimiento, la empuja/conduce levemente
-        foreach (var player in match.HomeTeam.Players.Concat(match.AwayTeam.Players))
+        var allPlayers = match.HomeTeam.Players.Concat(match.AwayTeam.Players).ToList();
+        var possessor = FindPlayer(match, match.Ball.PossessorId);
+        if (possessor != null)
         {
-            float dist = player.Position.DistanceTo(match.Ball.Position);
-            if (dist < 12f)
+            var opponent = allPlayers.Where(p => !SameTeam(match, p, possessor))
+                .OrderBy(p => p.Position.DistanceTo(possessor.Position)).FirstOrDefault();
+            if (opponent != null && opponent.Position.DistanceTo(possessor.Position) < StealDistance)
             {
-                // Conducción de pelota
-                float ballSpeed = MathF.Sqrt(match.Ball.Velocity.X * match.Ball.Velocity.X + match.Ball.Velocity.Y * match.Ball.Velocity.Y);
-                if (ballSpeed < 5f)
-                {
-                    match.Ball.SetPosition(player.Position.MoveBy(8f, 0f));
-                }
+                match.Ball.GiveTo(opponent.Id, BallPositionFor(opponent, match));
+                return;
             }
+            match.Ball.GiveTo(possessor.Id, BallPositionFor(possessor, match));
+            return;
         }
+
+        if (BallSpeed(match) > 18f) return;
+        var nearest = allPlayers.OrderBy(p => p.Position.DistanceTo(match.Ball.Position)).FirstOrDefault();
+        if (nearest != null && nearest.Position.DistanceTo(match.Ball.Position) <= BallControlDistance)
+            match.Ball.GiveTo(nearest.Id, BallPositionFor(nearest, match));
+    }
+
+    private static float BallSpeed(Match match) => MathF.Sqrt(match.Ball.Velocity.X * match.Ball.Velocity.X + match.Ball.Velocity.Y * match.Ball.Velocity.Y);
+
+    private static Position BallPositionFor(Player player, Match match)
+    {
+        float offsetX = match.HomeTeam.Players.Any(p => p.Id == player.Id) ? 12f : -12f;
+        return ClampToPitch(match, player.Position.MoveBy(offsetX, 0f));
+    }
+
+    private static Position ClampToPitch(Match match, Position position)
+    {
+        float halfWidth = match.PitchWidth / 2f - 12f, halfHeight = match.PitchHeight / 2f - 12f;
+        return new Position(Math.Clamp(position.X, -halfWidth, halfWidth), Math.Clamp(position.Y, -halfHeight, halfHeight));
+    }
+
+    private static bool SameTeam(Match match, Player first, Player second)
+    {
+        bool firstHome = match.HomeTeam.Players.Any(p => p.Id == first.Id);
+        bool secondHome = match.HomeTeam.Players.Any(p => p.Id == second.Id);
+        return firstHome == secondHome;
+    }
+
+    private static Player? FindPlayer(Match match, Guid? playerId)
+    {
+        if (!playerId.HasValue) return null;
+        return match.HomeTeam.Players.Concat(match.AwayTeam.Players).FirstOrDefault(p => p.Id == playerId.Value);
     }
 
     public void MovePlayer(MovePlayerCommand command)
@@ -161,19 +202,25 @@ public class MatchApplicationService
         float newX = player.Position.X + (command.SanitizedDeltaX * speed);
         float newY = player.Position.Y + (command.SanitizedDeltaY * speed);
 
-        player.MoveTo(new Position(newX, newY));
+        player.MoveTo(ClampToPitch(match, new Position(newX, newY)));
     }
 
     public void KickBall(KickBallCommand command)
     {
         var match = GetMatchOrThrow(command.MatchId);
         if (match.State != MatchState.InPlay) return;
+        var player = FindPlayer(match, command.PlayerId);
+        if (player == null)
+            player = match.HomeTeam.Players.OrderBy(p => p.Position.DistanceTo(match.Ball.Position)).FirstOrDefault();
+        if (player == null || player.Position.DistanceTo(match.Ball.Position) > BallControlDistance + 8f) return;
+        if (match.Ball.PossessorId.HasValue && match.Ball.PossessorId.Value != player.Id) return;
 
-        float dirX = float.IsNaN(command.DirectionX) ? 0f : command.DirectionX;
-        float dirY = float.IsNaN(command.DirectionY) ? 0f : command.DirectionY;
-        float power = Math.Clamp(command.Power, 10f, 100f);
-
-        match.Ball.ApplyImpulse(dirX * power, dirY * power);
+        float dirX = float.IsNaN(command.DirectionX) || float.IsInfinity(command.DirectionX) ? 0f : command.DirectionX;
+        float dirY = float.IsNaN(command.DirectionY) || float.IsInfinity(command.DirectionY) ? 0f : command.DirectionY;
+        float length = MathF.Sqrt(dirX * dirX + dirY * dirY);
+        if (length < 0.001f) return;
+        float power = Math.Clamp(float.IsNaN(command.Power) || float.IsInfinity(command.Power) ? 10f : command.Power, 10f, 100f);
+        match.Ball.ApplyImpulse(dirX / length * power, dirY / length * power);
         _soundService?.PlayKickSound();
     }
 

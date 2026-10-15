@@ -16,24 +16,31 @@ public class RaylibSoundService : ISoundService
 
     public void PlayKickSound()
     {
-        // Tono grave y muy corto para la patada
-        Task.Run(() => Console.Beep(220, 80));
+        Task.Run(() =>
+        {
+            try { Console.Beep(220, 60); } catch { }
+        });
     }
 
     public void PlayGoalWhistleSound()
     {
-        // Tono agudo tipo silbato de gol
         Task.Run(() =>
         {
-            Console.Beep(880, 150);
-            Thread.Sleep(50);
-            Console.Beep(880, 250);
+            try
+            {
+                Console.Beep(880, 120);
+                Thread.Sleep(40);
+                Console.Beep(880, 200);
+            }
+            catch { }
         });
     }
 
     public void PlayStartWhistleSound()
     {
-        // Silbato corto de inicio
-        Task.Run(() => Console.Beep(750, 200));
+        Task.Run(() =>
+        {
+            try { Console.Beep(750, 150); } catch { }
+        });
     }
 }
