@@ -1,4 +1,6 @@
 <Solution>
+  <Project Path="SoccerGame.Application.Tests/SoccerGame.Application.Tests.csproj" />
+  <Project Path="SoccerGame.Application/SoccerGame.Application.csproj" />
   <Project Path="SoccerGame.Domain.Tests/SoccerGame.Domain.Tests.csproj" />
   <Project Path="SoccerGame.Domain/SoccerGame.Domain.csproj" />
 </Solution>
