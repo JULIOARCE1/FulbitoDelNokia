@@ -4,6 +4,7 @@ using System.Text;
 
 using SoccerGame.Application.Commands;
 using SoccerGame.Application.DTOs;
+using SoccerGame.Application.Interfaces;
 using SoccerGame.Domain.Entities;
 using SoccerGame.Domain.ValueObjects;
 
@@ -12,13 +13,20 @@ namespace SoccerGame.Application.Services;
 public class MatchApplicationService
 {
     private readonly Dictionary<Guid, Match> _activeMatches = new();
+    private readonly ISoundService? _soundService;
+    private readonly IMatchRepository? _matchRepository;
+
+    public MatchApplicationService(ISoundService? soundService = null, IMatchRepository? matchRepository = null)
+    {
+        _soundService = soundService;
+        _matchRepository = matchRepository;
+    }
 
     public Guid CreateMatch(string homeTeamName, string awayTeamName, float durationSeconds = 180f)
     {
         var home = new Team(Guid.NewGuid(), homeTeamName);
         var away = new Team(Guid.NewGuid(), awayTeamName);
 
-        // Crear 3 jugadores básicos por equipo para la cancha retro
         home.AddPlayer(new Player(Guid.NewGuid(), "Delantero H", 9, new Position(-50f, 0f), PlayerStats.Default));
         home.AddPlayer(new Player(Guid.NewGuid(), "Medio H", 8, new Position(-150f, -50f), PlayerStats.Default));
         home.AddPlayer(new Player(Guid.NewGuid(), "Defensa H", 2, new Position(-250f, 50f), PlayerStats.Default));
@@ -38,19 +46,37 @@ public class MatchApplicationService
     {
         var match = GetMatchOrThrow(command.MatchId);
         match.Start();
+        _soundService?.PlayStartWhistleSound();
     }
 
     public void UpdateTick(UpdateTickCommand command)
     {
         var match = GetMatchOrThrow(command.MatchId);
+        var previousState = match.State;
 
         if (match.State == MatchState.GoalScored)
         {
-            // Reanudar automáticamente tras 2 segundos de festejo de gol
             match.ResumePlay();
         }
 
         match.UpdateTick(command.SanitizedDeltaTime);
+
+        // Disparar sonido si hubo un gol
+        if (previousState == MatchState.InPlay && match.State == MatchState.GoalScored)
+        {
+            _soundService?.PlayGoalWhistleSound();
+        }
+
+        // Guardar resultado si terminó el partido
+        if (previousState == MatchState.InPlay && match.State == MatchState.Finished)
+        {
+            _soundService?.PlayStartWhistleSound();
+            var status = GetMatchStatus(match.Id);
+            if (status != null && _matchRepository != null)
+            {
+                _ = _matchRepository.SaveMatchHistoryAsync(status);
+            }
+        }
     }
 
     public void MovePlayer(MovePlayerCommand command)
@@ -75,12 +101,12 @@ public class MatchApplicationService
         var match = GetMatchOrThrow(command.MatchId);
         if (match.State != MatchState.InPlay) return;
 
-        // Validar dirección para evitar NaN/Infinito
         float dirX = float.IsNaN(command.DirectionX) ? 0f : command.DirectionX;
         float dirY = float.IsNaN(command.DirectionY) ? 0f : command.DirectionY;
         float power = Math.Clamp(command.Power, 10f, 100f);
 
         match.Ball.ApplyImpulse(dirX * power, dirY * power);
+        _soundService?.PlayKickSound();
     }
 
     public MatchStatusDto? GetMatchStatus(Guid matchId)
