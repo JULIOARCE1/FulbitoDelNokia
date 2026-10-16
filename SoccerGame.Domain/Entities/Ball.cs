@@ -14,7 +14,7 @@ public class Ball
     public Position Velocity { get; private set; }
     public Guid? PossessorId { get; private set; }
 
-    private const float Friction = 2.5f;
+    private const float Friction = 3.0f;
 
     public Ball(Position initialPosition)
     {
@@ -57,7 +57,7 @@ public class Ball
         if (currentSpeed > 0f)
         {
             float newSpeed = MathF.Max(0f, currentSpeed - (Friction * currentSpeed * deltaTime));
-            if (newSpeed <= 0.05f)
+            if (newSpeed <= 0.1f)
             {
                 Velocity = Position.Zero;
             }

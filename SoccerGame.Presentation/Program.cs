@@ -50,16 +50,12 @@ public static class Program
 
                 if (Raylib.IsKeyPressed(KeyboardKey.Space))
                 {
-                    float kickDirX = inputX != 0f ? inputX : 1f;
-                    float kickDirY = inputY;
-                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, kickDirX, kickDirY, 65f));
+                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, inputX, inputY, 75f));
                 }
 
                 if (Raylib.IsKeyPressed(KeyboardKey.X))
                 {
-                    float passDirX = inputX != 0f ? inputX : 1f;
-                    float passDirY = inputY;
-                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, passDirX, passDirY, 35f));
+                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, inputX, inputY, 45f));
                 }
             }
 
