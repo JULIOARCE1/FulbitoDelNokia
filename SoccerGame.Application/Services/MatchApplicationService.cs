@@ -68,7 +68,7 @@ public class MatchApplicationService
         foreach (var p in awayPlayers)
         {
             _playerFacingDir[p.Id] = new Vector2(-1f, 0f);
-            _aiDecisionTimers[p.Id] = 0.4f;
+            _aiDecisionTimers[p.Id] = 0.3f;
         }
 
         match.Ball.Reset();
@@ -102,7 +102,7 @@ public class MatchApplicationService
         if (match.State == MatchState.InPlay)
         {
             UpdatePossessionEngine(match);
-            UpdateGoalkeepers(match);
+            UpdateGoalkeepers(match, dt);
             UpdateAIFiniteStateMachine(match, dt);
         }
 
@@ -137,18 +137,22 @@ public class MatchApplicationService
             Vector2 footPos = ClampToPitchVector(match, new Vector2(possessor.Position.X + facing.X * 14f, possessor.Position.Y + facing.Y * 14f));
             match.Ball.SetPosition(footPos);
 
-            // Robo por contacto directo de un rival
+            // ROBO EFECTIVO Y TRABADO DE BALÓN
             foreach (var opponent in allPlayers)
             {
                 if (SameTeam(match, possessor, opponent)) continue;
                 if (!match.Ball.CanBeCapturedBy(opponent)) continue;
 
                 float dist = Vector2.Distance(new Vector2(opponent.Position.X, opponent.Position.Y), new Vector2(possessor.Position.X, possessor.Position.Y));
+                bool opponentIsUserTeam = match.HomeTeam.Players.Any(p => p.Id == opponent.Id);
 
-                if (dist <= 18f)
+                // Tu equipo tiene un radio amplio de robo (34px)
+                float stealThreshold = opponentIsUserTeam ? 34f : 16f;
+
+                if (dist <= stealThreshold)
                 {
                     match.Ball.Attach(opponent);
-                    match.Ball.Block(possessor, 1.0f);
+                    match.Ball.Block(possessor, opponentIsUserTeam ? 1.2f : 0.5f);
                     _soundService?.PlayKickSound();
                     break;
                 }
@@ -156,14 +160,15 @@ public class MatchApplicationService
         }
         else
         {
-            // Pelota suelta o en pase/tiro
+            // Pelota libre
             if (match.Ball.Z <= Ball.ControlHeight)
             {
-                float captureRadius = (match.Ball.State == BallState.Free) ? 20f : 14f;
-
                 foreach (var player in allPlayers)
                 {
                     if (!match.Ball.CanBeCapturedBy(player)) continue;
+
+                    bool isUserTeam = match.HomeTeam.Players.Any(p => p.Id == player.Id);
+                    float captureRadius = isUserTeam ? 30f : 16f;
 
                     float dist = Vector2.Distance(new Vector2(player.Position.X, player.Position.Y), match.Ball.Position);
                     if (dist <= captureRadius)
@@ -177,29 +182,42 @@ public class MatchApplicationService
         }
     }
 
-    private void UpdateGoalkeepers(Match match)
+    private void UpdateGoalkeepers(Match match, float deltaTime)
     {
         float ballY = match.Ball.Position.Y;
+        float gkSpeed = 85f * deltaTime;
 
+        // Arquero Local (#1)
         var homeGk = match.HomeTeam.Players.FirstOrDefault(p => p.ShirtNumber == 1);
         if (homeGk != null)
         {
-            homeGk.MoveTo(new Position(-330f, Math.Clamp(ballY, -55f, 55f)));
-            float distToBall = Vector2.Distance(new Vector2(homeGk.Position.X, homeGk.Position.Y), match.Ball.Position);
+            float targetY = Math.Clamp(ballY, -50f, 50f);
+            float diffY = targetY - homeGk.Position.Y;
+            float newY = homeGk.Position.Y + Math.Clamp(diffY, -gkSpeed, gkSpeed);
+            homeGk.MoveTo(new Position(-330f, newY));
 
-            if (distToBall < 28f && match.Ball.Owner != homeGk)
+            float distToBall = Vector2.Distance(new Vector2(homeGk.Position.X, homeGk.Position.Y), match.Ball.Position);
+            float yDistance = MathF.Abs(homeGk.Position.Y - match.Ball.Position.Y);
+
+            if (distToBall < 22f && yDistance < 18f && match.Ball.Z < 20f && match.Ball.Owner != homeGk)
             {
                 ExecuteKickTowards(match, homeGk, new Vector2(150f, (_random.NextSingle() - 0.5f) * 120f), powerSpeed: 360f, vz: 80f, isShot: false);
             }
         }
 
+        // Arquero Visitante (#12)
         var awayGk = match.AwayTeam.Players.FirstOrDefault(p => p.ShirtNumber == 12);
         if (awayGk != null)
         {
-            awayGk.MoveTo(new Position(330f, Math.Clamp(ballY, -55f, 55f)));
-            float distToBall = Vector2.Distance(new Vector2(awayGk.Position.X, awayGk.Position.Y), match.Ball.Position);
+            float targetY = Math.Clamp(ballY, -50f, 50f);
+            float diffY = targetY - awayGk.Position.Y;
+            float newY = awayGk.Position.Y + Math.Clamp(diffY, -gkSpeed, gkSpeed);
+            awayGk.MoveTo(new Position(330f, newY));
 
-            if (distToBall < 28f && match.Ball.Owner != awayGk)
+            float distToBall = Vector2.Distance(new Vector2(awayGk.Position.X, awayGk.Position.Y), match.Ball.Position);
+            float yDistance = MathF.Abs(awayGk.Position.Y - match.Ball.Position.Y);
+
+            if (distToBall < 22f && yDistance < 18f && match.Ball.Z < 20f && match.Ball.Owner != awayGk)
             {
                 ExecuteKickTowards(match, awayGk, new Vector2(-150f, (_random.NextSingle() - 0.5f) * 120f), powerSpeed: 360f, vz: 80f, isShot: false);
             }
@@ -221,79 +239,61 @@ public class MatchApplicationService
         {
             if (match.Ball.Owner == enemy)
             {
-                Vector2 attackTarget = new Vector2(-350f, enemy.Position.Y * 0.3f);
-                MovePlayerInternal(match, enemy, attackTarget, deltaTime, 0.95f);
+                Vector2 attackTarget = new Vector2(-280f, enemy.Position.Y * 0.4f);
+                MovePlayerInternal(match, enemy, attackTarget, deltaTime, 0.85f);
 
                 _aiDecisionTimers[enemy.Id] -= deltaTime;
-                float distToGoal = Vector2.Distance(new Vector2(enemy.Position.X, enemy.Position.Y), new Vector2(-350f, 0f));
-                bool defenderClose = homePlayers.Any(h => Vector2.Distance(new Vector2(h.Position.X, h.Position.Y), new Vector2(enemy.Position.X, enemy.Position.Y)) < 40f);
+                float distToGoal = Vector2.Distance(new Vector2(enemy.Position.X, enemy.Position.Y), new Vector2(-330f, 0f));
 
-                if (_aiDecisionTimers[enemy.Id] <= 0f || defenderClose || distToGoal < 220f)
+                // REMATE OBLIGATORIO DESDE FUERA DEL ÁREA EN MANO A MANO
+                if (enemy.Position.X < -70f || distToGoal < 240f || _aiDecisionTimers[enemy.Id] <= 0f)
                 {
-                    // Si está en zona de tiro
-                    if (enemy.Position.X < -100f || distToGoal < 210f)
-                    {
-                        float targetY = (_random.Next(0, 2) == 0) ? -38f : 38f;
-                        ExecuteKickTowards(match, enemy, new Vector2(-350f, targetY), powerSpeed: 360f, vz: 30f, isShot: true);
-                    }
-                    // Si no, da un pase a un compañero desmarcado
-                    else
-                    {
-                        var mate = awayPlayers.FirstOrDefault(p => p.Id != enemy.Id);
-                        if (mate != null)
-                        {
-                            Vector2 matePos = new Vector2(mate.Position.X, mate.Position.Y);
-                            ExecuteKickTowards(match, enemy, matePos, powerSpeed: 250f, vz: 10f, isShot: false, passTarget: mate);
-                        }
-                    }
-
-                    _aiDecisionTimers[enemy.Id] = 0.6f;
+                    float targetY = (_random.Next(0, 2) == 0) ? -38f : 38f;
+                    ExecuteKickTowards(match, enemy, new Vector2(-330f, targetY), powerSpeed: 320f, vz: 25f, isShot: true);
+                    _aiDecisionTimers[enemy.Id] = 1.0f;
                 }
             }
             else if (enemy == closestEnemy)
             {
-                MovePlayerInternal(match, enemy, targetBallPos, deltaTime, 1.1f);
-                _aiDecisionTimers[enemy.Id] = 0.4f;
+                MovePlayerInternal(match, enemy, targetBallPos, deltaTime, 0.80f);
+                _aiDecisionTimers[enemy.Id] = 0.5f;
             }
             else
             {
                 float targetY = (enemy.ShirtNumber % 2 == 0) ? 70f : -70f;
-                float targetX = Math.Clamp(targetBallPos.X - 45f, -280f, 280f);
-                MovePlayerInternal(match, enemy, new Vector2(targetX, targetY), deltaTime, 0.7f);
+                float targetX = Math.Clamp(targetBallPos.X - 50f, -280f, 280f);
+                MovePlayerInternal(match, enemy, new Vector2(targetX, targetY), deltaTime, 0.60f);
             }
         }
 
-        // --- DEFICIT Y RECUPERACIÓN DE COMPAÑEROS LOCALES (RIVER) ---
+        // --- MARCA Y RECUPERACIÓN DE TUS COMPAÑEROS (RIVER) ---
         var closestHomePlayer = homePlayers.OrderBy(p => Vector2.Distance(new Vector2(p.Position.X, p.Position.Y), targetBallPos)).FirstOrDefault();
 
         foreach (var teammate in homePlayers)
         {
-            if (teammate.Id == controlledPlayerId) continue; // Jugador controlado por el usuario
+            if (teammate.Id == controlledPlayerId) continue;
 
             bool rivalHasBall = match.Ball.Owner != null && !SameTeam(match, teammate, match.Ball.Owner);
             bool ballIsFree = match.Ball.Owner == null;
 
             if (rivalHasBall || ballIsFree)
             {
-                // El compañero más cercano sale a recuperar / presionar la pelota
                 if (teammate == closestHomePlayer)
                 {
-                    MovePlayerInternal(match, teammate, targetBallPos, deltaTime, 1.05f);
+                    MovePlayerInternal(match, teammate, targetBallPos, deltaTime, 1.20f);
                 }
                 else
                 {
-                    // Cobertura defensiva de la zona central
-                    float targetY = (teammate.ShirtNumber % 2 == 0) ? 50f : -50f;
-                    float targetX = Math.Clamp(targetBallPos.X + 30f, -260f, 100f);
-                    MovePlayerInternal(match, teammate, new Vector2(targetX, targetY), deltaTime, 0.75f);
+                    float targetY = (teammate.ShirtNumber % 2 == 0) ? 45f : -45f;
+                    float targetX = Math.Clamp(targetBallPos.X + 15f, -260f, 100f);
+                    MovePlayerInternal(match, teammate, new Vector2(targetX, targetY), deltaTime, 0.90f);
                 }
             }
             else
             {
-                // Ataque: Acompañar el avance abriendo la cancha
                 float targetY = (teammate.ShirtNumber % 2 == 0) ? 75f : -75f;
                 float targetX = Math.Clamp(targetBallPos.X + 50f, -280f, 280f);
-                MovePlayerInternal(match, teammate, new Vector2(targetX, targetY), deltaTime, 0.75f);
+                MovePlayerInternal(match, teammate, new Vector2(targetX, targetY), deltaTime, 0.85f);
             }
         }
     }
@@ -349,7 +349,7 @@ public class MatchApplicationService
             Vector2 dir = Vector2.Normalize(new Vector2(inputX, inputY));
             _playerFacingDir[player.Id] = dir;
 
-            float speed = player.Stats.Speed * 35f;
+            float speed = player.Stats.Speed * 40f; // Velocidad del jugador humano aumentada
             float newX = player.Position.X + (dir.X * speed * 0.016f);
             float newY = player.Position.Y + (dir.Y * speed * 0.016f);
 
@@ -365,12 +365,27 @@ public class MatchApplicationService
         var controlledPlayerId = GetClosestHomePlayerId(match);
         var player = match.HomeTeam.Players.FirstOrDefault(p => p.Id == controlledPlayerId);
 
-        if (player != null && (match.Ball.Owner == player || Vector2.Distance(new Vector2(player.Position.X, player.Position.Y), match.Ball.Position) < 24f))
+        // TACLE / ROBO CUANDO EL RIVAL TIENE LA PELOTA
+        if (player != null && match.Ball.Owner != null && !SameTeam(match, player, match.Ball.Owner))
         {
-            float powerSpeed = Math.Clamp(command.Power * Ball.PowerToSpeed, 180f, 380f);
-            float vz = command.Power > 65f ? (command.Power - 65f) * 4f : 0f;
+            float distToOwner = Vector2.Distance(new Vector2(player.Position.X, player.Position.Y), new Vector2(match.Ball.Owner.Position.X, match.Ball.Owner.Position.Y));
+            if (distToOwner < 42f)
+            {
+                var victim = match.Ball.Owner;
+                match.Ball.Attach(player);
+                match.Ball.Block(victim, 1.2f);
+                _soundService?.PlayKickSound();
+                return;
+            }
+        }
 
-            if (command.Power < 50f)
+        if (player != null && (match.Ball.Owner == player || Vector2.Distance(new Vector2(player.Position.X, player.Position.Y), match.Ball.Position) < 30f))
+        {
+            float powerSpeed = Math.Clamp(command.Power * Ball.PowerToSpeed, 200f, 400f);
+            float vz = command.Power > 60f ? (command.Power - 60f) * 4.5f : 10f;
+
+            // PASE DIRECTO (Solo si viene de tecla X / H)
+            if (command.IsPass)
             {
                 var teammate = match.HomeTeam.Players
                     .Where(p => p.ShirtNumber != 1 && p.Id != player.Id)
@@ -379,15 +394,16 @@ public class MatchApplicationService
 
                 if (teammate != null)
                 {
-                    ExecuteKickTowards(match, player, new Vector2(teammate.Position.X, teammate.Position.Y), powerSpeed: 250f, vz: 10f, isShot: false, passTarget: teammate);
+                    ExecuteKickTowards(match, player, new Vector2(teammate.Position.X, teammate.Position.Y), powerSpeed: 260f, vz: 10f, isShot: false, passTarget: teammate);
                     return;
                 }
             }
 
+            // TIRO AL ARCO (Espacio) - Ejecuta un disparo sin importar la potencia
             Vector2 dir = new Vector2(command.DirectionX, command.DirectionY);
-            if (dir.X == 0f && dir.Y == 0f) dir = new Vector2(1f, (_random.Next(0, 2) == 0) ? -0.2f : 0.2f);
+            if (dir.X == 0f && dir.Y == 0f) dir = new Vector2(1f, (_random.Next(0, 2) == 0) ? -0.15f : 0.15f);
 
-            Vector2 target = new Vector2(player.Position.X, player.Position.Y) + dir * 120f;
+            Vector2 target = new Vector2(player.Position.X, player.Position.Y) + dir * 150f;
             ExecuteKickTowards(match, player, target, powerSpeed, vz, isShot: true);
         }
     }

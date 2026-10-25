@@ -59,14 +59,15 @@ public static class Program
 
                 if (Raylib.IsKeyReleased(KeyboardKey.Space))
                 {
-                    float power = MathF.Max(30f, powerCharge);
-                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, inputX, inputY, power));
+                    float power = MathF.Max(35f, powerCharge);
+                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, inputX, inputY, power, IsPass: false));
                     powerCharge = 0f;
                 }
 
+                // TECLA X / H: Pase Corto Asistido a Compañero
                 if (Raylib.IsKeyReleased(KeyboardKey.X) || Raylib.IsKeyReleased(KeyboardKey.H))
                 {
-                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, inputX, inputY, 35f));
+                    matchService.KickBall(new KickBallCommand(matchId, controlledPlayer.Id, inputX, inputY, 35f, IsPass: true));
                     powerCharge = 0f;
                 }
             }
