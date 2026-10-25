@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace SoccerGame.Application.DTOs;
+﻿namespace SoccerGame.Application.DTOs;
 
 public record PlayerDto(Guid Id, string Name, int ShirtNumber, float X, float Y, bool IsHomeTeam);
 
@@ -16,5 +12,6 @@ public record MatchStatusDto(
     float ElapsedTimeInSeconds,
     float BallX,
     float BallY,
+    float BallZ,
     IReadOnlyCollection<PlayerDto> Players
 );

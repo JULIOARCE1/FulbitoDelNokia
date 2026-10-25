@@ -1,22 +1,33 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Numerics;
 
-namespace SoccerGame.Domain.ValueObjects
+namespace SoccerGame.Domain.ValueObjects;
+
+public struct Position
 {
-    public readonly record struct Position(float X, float Y)
+    public float X { get; }
+    public float Y { get; }
+
+    public static Position Zero => new(0f, 0f);
+
+    public Position(float x, float y)
     {
-        public static Position Zero => new(0f, 0f);
-
-        public Position MoveBy(float deltaX, float deltaY) => new(X + deltaX, Y + deltaY);
-
-        public float DistanceTo(Position other)
-        {
-            float dx = X - other.X;
-            float dy = Y - other.Y;
-            return MathF.Sqrt(dx * dx + dy * dy);
-        }
+        X = x;
+        Y = y;
     }
+
+    public float DistanceTo(Position other)
+    {
+        float dx = X - other.X;
+        float dy = Y - other.Y;
+        return MathF.Sqrt(dx * dx + dy * dy);
+    }
+
+    public Position MoveBy(float dx, float dy)
+    {
+        return new Position(X + dx, Y + dy);
+    }
+
+    // Conversiones automáticas a Vector2 para interoperabilidad con Ball
+    public static implicit operator Vector2(Position pos) => new(pos.X, pos.Y);
+    public static implicit operator Position(Vector2 vec) => new(vec.X, vec.Y);
 }

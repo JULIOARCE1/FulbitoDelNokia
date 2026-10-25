@@ -1,9 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
+﻿using System.Numerics;
 using SoccerGame.Domain.ValueObjects;
 
 namespace SoccerGame.Domain.Entities;
@@ -12,7 +7,6 @@ public enum MatchState
 {
     NotStarted,
     InPlay,
-    Paused,
     GoalScored,
     Finished
 }
@@ -23,104 +17,70 @@ public class Match
     public Team HomeTeam { get; }
     public Team AwayTeam { get; }
     public Ball Ball { get; }
-    public Score Score { get; private set; }
-    public MatchState State { get; private set; }
+    public Score Score { get; } = new();
+    public MatchState State { get; private set; } = MatchState.NotStarted;
     public float ElapsedTimeInSeconds { get; private set; }
     public float DurationInSeconds { get; }
 
-    // Definición conceptual del campo (ancho: 700, alto: 500)
-    public float PitchWidth { get; } = 700f;
-    public float PitchHeight { get; } = 500f;
+    public float PitchWidth { get; } = 640f;
+    public float PitchHeight { get; } = 420f;
 
     public Match(Guid id, Team homeTeam, Team awayTeam, Ball ball, float durationInSeconds = 180f)
     {
-        ArgumentNullException.ThrowIfNull(homeTeam);
-        ArgumentNullException.ThrowIfNull(awayTeam);
-        ArgumentNullException.ThrowIfNull(ball);
-
-        if (durationInSeconds <= 0)
-            throw new ArgumentOutOfRangeException(nameof(durationInSeconds), "La duración debe ser positiva.");
-
         Id = id;
         HomeTeam = homeTeam;
         AwayTeam = awayTeam;
         Ball = ball;
-        Score = Score.Initial;
-        State = MatchState.NotStarted;
-        ElapsedTimeInSeconds = 0f;
         DurationInSeconds = durationInSeconds;
     }
 
-    public void Start()
-    {
-        if (State != MatchState.NotStarted)
-            throw new InvalidOperationException("Solo se puede iniciar un partido que no haya comenzado.");
+    public void Start() => State = MatchState.InPlay;
 
-        State = MatchState.InPlay;
-    }
-
-    public void UpdateTick(float deltaTime)
-    {
-        if (State != MatchState.InPlay || deltaTime <= 0f) return;
-
-        ElapsedTimeInSeconds += deltaTime;
-        Ball.UpdatePosition(deltaTime);
-
-        CheckGoalConditions();
-
-        if (ElapsedTimeInSeconds >= DurationInSeconds)
-        {
-            ElapsedTimeInSeconds = DurationInSeconds;
-            State = MatchState.Finished;
-        }
-    }
-
-    private void CheckGoalConditions()
-    {
-        float halfWidth = PitchWidth / 2f;
-        float halfGoalHeight = 60f; // Alto del arco
-
-        // Gol del equipo visitante (Arco izquierdo)
-        if (Ball.Position.X < -halfWidth && MathF.Abs(Ball.Position.Y) < halfGoalHeight)
-        {
-            ScoreGoalForAwayTeam();
-            ResetPositionsAfterGoal();
-        }
-        // Gol del equipo local (Arco derecho)
-        else if (Ball.Position.X > halfWidth && MathF.Abs(Ball.Position.Y) < halfGoalHeight)
-        {
-            ScoreGoalForHomeTeam();
-            ResetPositionsAfterGoal();
-        }
-    }
-
-    private void ResetPositionsAfterGoal()
-    {
-        Ball.SetPosition(Position.Zero);
-        Ball.Stop();
-    }
+    public void ResumePlay() => State = MatchState.InPlay;
 
     public void ScoreGoalForHomeTeam()
     {
-        if (State != MatchState.InPlay) return;
-
-        Score = Score.IncrementHome();
+        Score.GoalHome();
         State = MatchState.GoalScored;
+        Ball.Reset();
     }
 
     public void ScoreGoalForAwayTeam()
     {
-        if (State != MatchState.InPlay) return;
-
-        Score = Score.IncrementAway();
+        Score.GoalAway();
         State = MatchState.GoalScored;
+        Ball.Reset();
     }
 
-    public void ResumePlay()
+    public void UpdateTick(float deltaTime)
     {
-        if (State == MatchState.GoalScored || State == MatchState.Paused)
+        if (State != MatchState.InPlay) return;
+
+        ElapsedTimeInSeconds += deltaTime;
+        if (ElapsedTimeInSeconds >= DurationInSeconds)
         {
-            State = MatchState.InPlay;
+            State = MatchState.Finished;
+            return;
+        }
+
+        Ball.Update(deltaTime);
+        CheckGoalScored();
+    }
+
+    private void CheckGoalScored()
+    {
+        float goalTop = 60f;
+        float goalBottom = -60f;
+
+        // Gol de Visitante (Arco Local X <= -320)
+        if (Ball.Position.X <= -320f && Ball.Position.Y >= goalBottom && Ball.Position.Y <= goalTop)
+        {
+            ScoreGoalForAwayTeam();
+        }
+        // Gol de Local (Arco Visitante X >= 320)
+        else if (Ball.Position.X >= 320f && Ball.Position.Y >= goalBottom && Ball.Position.Y <= goalTop)
+        {
+            ScoreGoalForHomeTeam();
         }
     }
 }

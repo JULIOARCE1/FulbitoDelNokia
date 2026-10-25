@@ -1,71 +1,167 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-using SoccerGame.Domain.ValueObjects;
+﻿using System.Numerics;
 
 namespace SoccerGame.Domain.Entities;
 
-public class Ball
+public enum BallState
 {
-    public Position Position { get; private set; }
-    public Position Velocity { get; private set; }
-    public Guid? PossessorId { get; private set; }
+    Free,
+    Controlled,
+    InPass,
+    InShot
+}
 
-    private const float Friction = 3.0f;
+public sealed class Ball
+{
+    public const float Friction = 2.5f;
+    public const float Gravity = 300f;
+    public const float AirDrag = 0.15f;
+    public const float BounceRestitution = 0.45f;
+    public const float PowerToSpeed = 20f;
+    public const float ControlHeight = 16f;
 
-    public Ball(Position initialPosition)
+    private const float StopSpeed = 35f;
+
+    public Vector2 Position { get; set; }
+    public Vector2 Velocity { get; set; }
+    public float Z { get; set; }
+    public float VZ { get; set; }
+
+    public BallState State { get; private set; } = BallState.Free;
+    public Player? Owner { get; private set; }
+    public Player? PassTarget { get; private set; }
+    public Player? LastToucher { get; private set; }
+
+    public Player? BlockedPlayer { get; private set; }
+    public float BlockedTimer { get; private set; }
+
+    public bool IsAirborne => Z > 0.5f;
+    public float Speed => Velocity.Length();
+
+    public event Action? Bounced;
+
+    public Ball(Vector2 initialPosition)
     {
         Position = initialPosition;
-        Velocity = Position.Zero;
-        PossessorId = null;
+        Velocity = Vector2.Zero;
+        Z = 0f;
+        VZ = 0f;
     }
 
-    public void SetPosition(Position newPosition) => Position = newPosition;
-
-    public void Stop()
+    public void Reset()
     {
-        Velocity = Position.Zero;
-        PossessorId = null;
+        Position = Vector2.Zero;
+        Velocity = Vector2.Zero;
+        Z = 0f;
+        VZ = 0f;
+        State = BallState.Free;
+        Owner = null;
+        PassTarget = null;
+        LastToucher = null;
+        BlockedPlayer = null;
+        BlockedTimer = 0f;
     }
 
-    public void GiveTo(Guid playerId, Position position)
+    public void SetPosition(Vector2 position)
     {
-        PossessorId = playerId;
         Position = position;
-        Velocity = Position.Zero;
     }
 
-    public void ApplyImpulse(float velocityX, float velocityY)
+    public void Attach(Player player)
     {
-        PossessorId = null;
-        Velocity = new Position(velocityX, velocityY);
+        Owner = player;
+        LastToucher = player;
+        PassTarget = null;
+        State = BallState.Controlled;
+        Velocity = Vector2.Zero;
+        Z = 0f;
+        VZ = 0f;
     }
 
-    public void UpdatePosition(float deltaTime)
+    public void Release(Player kicker, Vector2 velocity, float vz, BallState state, float blockSeconds, Player? passTarget = null)
     {
-        if (deltaTime <= 0f || PossessorId.HasValue) return;
+        Owner = null;
+        State = state;
+        Velocity = velocity;
+        VZ = vz;
+        if (vz > 0f && Z < 0.5f) Z = 0.5f;
+        PassTarget = passTarget;
+        LastToucher = kicker;
+        Block(kicker, blockSeconds);
+    }
 
-        float newX = Position.X + (Velocity.X * deltaTime);
-        float newY = Position.Y + (Velocity.Y * deltaTime);
-        Position = new Position(newX, newY);
+    public void Block(Player player, float seconds)
+    {
+        BlockedPlayer = player;
+        BlockedTimer = seconds;
+    }
 
-        float currentSpeed = MathF.Sqrt(Velocity.X * Velocity.X + Velocity.Y * Velocity.Y);
+    public bool CanBeCapturedBy(Player player) => BlockedTimer <= 0f || BlockedPlayer != player;
 
-        if (currentSpeed > 0f)
+    public void SetFree()
+    {
+        Owner = null;
+        PassTarget = null;
+        State = BallState.Free;
+    }
+
+    public Vector2 PredictLanding()
+    {
+        if (State == BallState.Controlled) return Position;
+        if (Z > 0.5f || VZ > 0f)
         {
-            float newSpeed = MathF.Max(0f, currentSpeed - (Friction * currentSpeed * deltaTime));
-            if (newSpeed <= 0.1f)
+            float t = (VZ + MathF.Sqrt(MathF.Max(0f, VZ * VZ + 2f * Gravity * Z))) / Gravity;
+            return Position + Velocity * t * (1f - AirDrag * t * 0.5f);
+        }
+        return Position + Velocity * 0.25f;
+    }
+
+    public void Update(float dt)
+    {
+        if (BlockedTimer > 0f)
+        {
+            BlockedTimer -= dt;
+            if (BlockedTimer <= 0f)
             {
-                Velocity = Position.Zero;
+                BlockedTimer = 0f;
+                BlockedPlayer = null;
             }
-            else
+        }
+
+        if (State == BallState.Controlled) return;
+
+        // --- Eje vertical (Z): Gravedad y Rebote ---
+        if (Z > 0f || VZ > 0f)
+        {
+            VZ -= Gravity * dt;
+            Z += VZ * dt;
+            if (Z <= 0f)
             {
-                float factor = newSpeed / currentSpeed;
-                Velocity = new Position(Velocity.X * factor, Velocity.Y * factor);
+                Z = 0f;
+                if (MathF.Abs(VZ) > 45f)
+                {
+                    VZ = -VZ * BounceRestitution;
+                    Velocity *= 0.82f;
+                    Bounced?.Invoke();
+                }
+                else
+                {
+                    VZ = 0f;
+                }
             }
+        }
+
+        // --- Plano horizontal: Rozamiento según superficie/aire ---
+        bool rolling = Z <= 0f && VZ <= 0f;
+        float k = rolling ? Friction : AirDrag;
+        Velocity *= MathF.Max(0f, 1f - k * dt);
+        Position += Velocity * dt;
+
+        if (rolling && Velocity.LengthSquared() < 16f) Velocity = Vector2.Zero;
+
+        if (State != BallState.Free && rolling && Speed < StopSpeed)
+        {
+            State = BallState.Free;
+            PassTarget = null;
         }
     }
 }

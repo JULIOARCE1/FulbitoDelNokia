@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
+﻿using System.Numerics;
 using SoccerGame.Application.Commands;
 using SoccerGame.Application.DTOs;
 using SoccerGame.Application.Interfaces;
@@ -16,12 +13,8 @@ public class MatchApplicationService
     private readonly ISoundService? _soundService;
     private readonly IMatchRepository? _matchRepository;
 
-    private Guid? _possessorPlayerId = null;
-    private Guid? _stolenFromPlayerId = null; // Jugador a quien le quitaron la pelota (Inmunidad)
-    private float _reStealImmunityTimer = 0f;
-    private float _passCooldown = 0f;
-
-    private readonly Dictionary<Guid, Position> _playerFacingDir = new();
+    private readonly Dictionary<Guid, Vector2> _playerFacingDir = new();
+    private readonly Dictionary<Guid, float> _aiDecisionTimers = new();
     private readonly Random _random = new();
 
     public MatchApplicationService(ISoundService? soundService = null, IMatchRepository? matchRepository = null)
@@ -35,26 +28,50 @@ public class MatchApplicationService
         var home = new Team(Guid.NewGuid(), homeTeamName);
         var away = new Team(Guid.NewGuid(), awayTeamName);
 
-        // Local (River - Ataca hacia +X a la derecha)
+        // Local (River Plate)
         home.AddPlayer(new Player(Guid.NewGuid(), "Arquero H", 1, new Position(-330f, 0f), PlayerStats.Default));
         home.AddPlayer(new Player(Guid.NewGuid(), "Defensa H", 2, new Position(-180f, 60f), PlayerStats.Default));
         home.AddPlayer(new Player(Guid.NewGuid(), "Medio H", 8, new Position(-90f, -50f), PlayerStats.Default));
         home.AddPlayer(new Player(Guid.NewGuid(), "Delantero H", 9, new Position(-20f, 0f), PlayerStats.Default));
 
-        // Visitante (Boca - Ataca hacia -X a la izquierda)
+        // Visitante (Boca Juniors)
         away.AddPlayer(new Player(Guid.NewGuid(), "Arquero A", 12, new Position(330f, 0f), PlayerStats.Default));
         away.AddPlayer(new Player(Guid.NewGuid(), "Defensa A", 3, new Position(180f, -60f), PlayerStats.Default));
         away.AddPlayer(new Player(Guid.NewGuid(), "Medio A", 10, new Position(90f, 50f), PlayerStats.Default));
         away.AddPlayer(new Player(Guid.NewGuid(), "Delantero A", 11, new Position(20f, 0f), PlayerStats.Default));
 
-        var ball = new Ball(Position.Zero);
+        var ball = new Ball(Vector2.Zero);
         var match = new Match(Guid.NewGuid(), home, away, ball, durationSeconds);
 
-        foreach (var p in home.Players) _playerFacingDir[p.Id] = new Position(1f, 0f);
-        foreach (var p in away.Players) _playerFacingDir[p.Id] = new Position(-1f, 0f);
+        ResetFormations(match);
 
         _activeMatches[match.Id] = match;
         return match.Id;
+    }
+
+    private void ResetFormations(Match match)
+    {
+        var homePlayers = match.HomeTeam.Players.ToList();
+        var awayPlayers = match.AwayTeam.Players.ToList();
+
+        homePlayers.FirstOrDefault(p => p.ShirtNumber == 1)?.MoveTo(new Position(-330f, 0f));
+        homePlayers.FirstOrDefault(p => p.ShirtNumber == 2)?.MoveTo(new Position(-180f, 60f));
+        homePlayers.FirstOrDefault(p => p.ShirtNumber == 8)?.MoveTo(new Position(-90f, -50f));
+        homePlayers.FirstOrDefault(p => p.ShirtNumber == 9)?.MoveTo(new Position(-20f, 0f));
+
+        awayPlayers.FirstOrDefault(p => p.ShirtNumber == 12)?.MoveTo(new Position(330f, 0f));
+        awayPlayers.FirstOrDefault(p => p.ShirtNumber == 3)?.MoveTo(new Position(180f, -60f));
+        awayPlayers.FirstOrDefault(p => p.ShirtNumber == 10)?.MoveTo(new Position(90f, 50f));
+        awayPlayers.FirstOrDefault(p => p.ShirtNumber == 11)?.MoveTo(new Position(20f, 0f));
+
+        foreach (var p in homePlayers) _playerFacingDir[p.Id] = new Vector2(1f, 0f);
+        foreach (var p in awayPlayers)
+        {
+            _playerFacingDir[p.Id] = new Vector2(-1f, 0f);
+            _aiDecisionTimers[p.Id] = 0.4f;
+        }
+
+        match.Ball.Reset();
     }
 
     public void StartMatch(StartMatchCommand command)
@@ -73,28 +90,24 @@ public class MatchApplicationService
         var previousState = match.State;
         float dt = command.SanitizedDeltaTime;
 
-        if (_passCooldown > 0f) _passCooldown -= dt;
-        if (_reStealImmunityTimer > 0f) _reStealImmunityTimer -= dt;
-        else _stolenFromPlayerId = null;
-
         if (match.State == MatchState.GoalScored)
         {
-            _possessorPlayerId = null;
+            ResetFormations(match);
             match.ResumePlay();
         }
 
         match.UpdateTick(dt);
+        match.Ball.Update(dt);
 
         if (match.State == MatchState.InPlay)
         {
-            UpdateBallAndPossession(match);
+            UpdatePossessionEngine(match);
             UpdateGoalkeepers(match);
-            UpdateFieldAI(match, dt);
+            UpdateAIFiniteStateMachine(match, dt);
         }
 
         if (previousState == MatchState.InPlay && match.State == MatchState.GoalScored)
         {
-            _possessorPlayerId = null;
             _soundService?.PlayGoalWhistleSound();
         }
 
@@ -109,63 +122,53 @@ public class MatchApplicationService
         }
     }
 
-    private void UpdateBallAndPossession(Match match)
+    private void UpdatePossessionEngine(Match match)
     {
         var allPlayers = match.HomeTeam.Players.Concat(match.AwayTeam.Players).ToList();
 
-        if (_possessorPlayerId.HasValue)
+        if (match.Ball.State == BallState.Controlled && match.Ball.Owner != null)
         {
-            var possessor = allPlayers.FirstOrDefault(p => p.Id == _possessorPlayerId.Value);
-            if (possessor != null)
+            var possessor = match.Ball.Owner;
+            if (!_playerFacingDir.TryGetValue(possessor.Id, out var facing))
             {
-                if (!_playerFacingDir.TryGetValue(possessor.Id, out var facing))
-                {
-                    facing = possessor.Position.X >= 0 ? new Position(-1f, 0f) : new Position(1f, 0f);
-                }
-
-                // Pelota ubicada justo frente al jugador según la dirección a la que mira
-                float ballX = possessor.Position.X + (facing.X * 14f);
-                float ballY = possessor.Position.Y + (facing.Y * 14f);
-                match.Ball.SetPosition(ClampToPitch(match, new Position(ballX, ballY)));
-
-                // ROBO / TACKLE: Un rival cercano le quita el balón si no tiene inmunidad activa
-                foreach (var opponent in allPlayers)
-                {
-                    if (SameTeam(match, possessor, opponent)) continue;
-                    if (opponent.Id == _stolenFromPlayerId && _reStealImmunityTimer > 0f) continue;
-
-                    float distToPossessor = opponent.Position.DistanceTo(possessor.Position);
-
-                    if (distToPossessor < 16f)
-                    {
-                        _stolenFromPlayerId = possessor.Id;
-                        _reStealImmunityTimer = 1.0f; // 1 segundo de inmunidad para evitar robos continuos
-                        _possessorPlayerId = opponent.Id;
-                        _passCooldown = 0.25f;
-                        _soundService?.PlayKickSound();
-                        break;
-                    }
-                }
+                facing = possessor.Position.X >= 0 ? new Vector2(-1f, 0f) : new Vector2(1f, 0f);
             }
-            else
+
+            Vector2 footPos = ClampToPitchVector(match, new Vector2(possessor.Position.X + facing.X * 14f, possessor.Position.Y + facing.Y * 14f));
+            match.Ball.SetPosition(footPos);
+
+            // Robo por contacto directo de un rival
+            foreach (var opponent in allPlayers)
             {
-                _possessorPlayerId = null;
+                if (SameTeam(match, possessor, opponent)) continue;
+                if (!match.Ball.CanBeCapturedBy(opponent)) continue;
+
+                float dist = Vector2.Distance(new Vector2(opponent.Position.X, opponent.Position.Y), new Vector2(possessor.Position.X, possessor.Position.Y));
+
+                if (dist <= 18f)
+                {
+                    match.Ball.Attach(opponent);
+                    match.Ball.Block(possessor, 1.0f);
+                    _soundService?.PlayKickSound();
+                    break;
+                }
             }
         }
         else
         {
-            // Pelota libre: captura el jugador más cercano que se aproxima
-            float ballSpeed = MathF.Sqrt(match.Ball.Velocity.X * match.Ball.Velocity.X + match.Ball.Velocity.Y * match.Ball.Velocity.Y);
-            if (ballSpeed < 35f && _passCooldown <= 0f)
+            // Pelota suelta o en pase/tiro
+            if (match.Ball.Z <= Ball.ControlHeight)
             {
+                float captureRadius = (match.Ball.State == BallState.Free) ? 20f : 14f;
+
                 foreach (var player in allPlayers)
                 {
-                    if (player.Id == _stolenFromPlayerId && _reStealImmunityTimer > 0f) continue;
+                    if (!match.Ball.CanBeCapturedBy(player)) continue;
 
-                    if (player.Position.DistanceTo(match.Ball.Position) < 18f)
+                    float dist = Vector2.Distance(new Vector2(player.Position.X, player.Position.Y), match.Ball.Position);
+                    if (dist <= captureRadius)
                     {
-                        _possessorPlayerId = player.Id;
-                        match.Ball.Stop();
+                        match.Ball.Attach(player);
                         _soundService?.PlayKickSound();
                         break;
                     }
@@ -178,105 +181,124 @@ public class MatchApplicationService
     {
         float ballY = match.Ball.Position.Y;
 
-        // Arquero Local (#1)
         var homeGk = match.HomeTeam.Players.FirstOrDefault(p => p.ShirtNumber == 1);
         if (homeGk != null)
         {
-            float targetY = Math.Clamp(ballY, -55f, 55f);
-            homeGk.MoveTo(new Position(-330f, targetY));
+            homeGk.MoveTo(new Position(-330f, Math.Clamp(ballY, -55f, 55f)));
+            float distToBall = Vector2.Distance(new Vector2(homeGk.Position.X, homeGk.Position.Y), match.Ball.Position);
 
-            // Si la pelota entra al área chica local, el arquero ataja y despeja
-            if (match.Ball.Position.X < -310f && MathF.Abs(match.Ball.Position.Y) < 60f)
+            if (distToBall < 28f && match.Ball.Owner != homeGk)
             {
-                match.Ball.ApplyImpulse(65f, (_random.NextSingle() - 0.5f) * 30f);
-                _soundService?.PlayKickSound();
-                _possessorPlayerId = null;
+                ExecuteKickTowards(match, homeGk, new Vector2(150f, (_random.NextSingle() - 0.5f) * 120f), powerSpeed: 360f, vz: 80f, isShot: false);
             }
         }
 
-        // Arquero Visitante (#12)
         var awayGk = match.AwayTeam.Players.FirstOrDefault(p => p.ShirtNumber == 12);
         if (awayGk != null)
         {
-            float targetY = Math.Clamp(ballY, -55f, 55f);
-            awayGk.MoveTo(new Position(330f, targetY));
+            awayGk.MoveTo(new Position(330f, Math.Clamp(ballY, -55f, 55f)));
+            float distToBall = Vector2.Distance(new Vector2(awayGk.Position.X, awayGk.Position.Y), match.Ball.Position);
 
-            // Si la pelota entra al área chica visitante, despeja
-            if (match.Ball.Position.X > 310f && MathF.Abs(match.Ball.Position.Y) < 60f)
+            if (distToBall < 28f && match.Ball.Owner != awayGk)
             {
-                match.Ball.ApplyImpulse(-65f, (_random.NextSingle() - 0.5f) * 30f);
-                _soundService?.PlayKickSound();
-                _possessorPlayerId = null;
+                ExecuteKickTowards(match, awayGk, new Vector2(-150f, (_random.NextSingle() - 0.5f) * 120f), powerSpeed: 360f, vz: 80f, isShot: false);
             }
         }
     }
 
-    private void UpdateFieldAI(Match match, float deltaTime)
+    private void UpdateAIFiniteStateMachine(Match match, float deltaTime)
     {
-        var ballPos = match.Ball.Position;
+        Vector2 targetBallPos = match.Ball.PredictLanding();
         var awayPlayers = match.AwayTeam.Players.Where(p => p.ShirtNumber != 12).ToList();
         var homePlayers = match.HomeTeam.Players.Where(p => p.ShirtNumber != 1).ToList();
 
         var controlledPlayerId = GetClosestHomePlayerId(match);
 
-        // --- IA RIVAL (VISITANTE) ---
-        var closestEnemy = awayPlayers.OrderBy(p => p.Position.DistanceTo(ballPos)).FirstOrDefault();
+        // --- IA RIVAL (BOCA) ---
+        var closestEnemy = awayPlayers.OrderBy(p => Vector2.Distance(new Vector2(p.Position.X, p.Position.Y), targetBallPos)).FirstOrDefault();
 
         foreach (var enemy in awayPlayers)
         {
-            if (_possessorPlayerId == enemy.Id)
+            if (match.Ball.Owner == enemy)
             {
-                // Conducción hacia el arco humano (X = -350)
-                Position attackTarget = new Position(-350f, enemy.Position.Y * 0.4f);
-                MovePlayerInternal(match, enemy, attackTarget, deltaTime, 1.0f);
+                Vector2 attackTarget = new Vector2(-350f, enemy.Position.Y * 0.3f);
+                MovePlayerInternal(match, enemy, attackTarget, deltaTime, 0.95f);
 
-                if (_passCooldown <= 0f)
+                _aiDecisionTimers[enemy.Id] -= deltaTime;
+                float distToGoal = Vector2.Distance(new Vector2(enemy.Position.X, enemy.Position.Y), new Vector2(-350f, 0f));
+                bool defenderClose = homePlayers.Any(h => Vector2.Distance(new Vector2(h.Position.X, h.Position.Y), new Vector2(enemy.Position.X, enemy.Position.Y)) < 40f);
+
+                if (_aiDecisionTimers[enemy.Id] <= 0f || defenderClose || distToGoal < 220f)
                 {
-                    float distToGoal = enemy.Position.DistanceTo(new Position(-350f, 0f));
-
-                    // REMATE AL ARCO
-                    if (enemy.Position.X < -40f || distToGoal < 200f)
+                    // Si está en zona de tiro
+                    if (enemy.Position.X < -100f || distToGoal < 210f)
                     {
-                        float targetY = (_random.Next(0, 2) == 0) ? -35f : 35f;
-                        ExecuteKickTowards(match, enemy, new Position(-350f, targetY), 75f);
-                        _passCooldown = 1.0f;
+                        float targetY = (_random.Next(0, 2) == 0) ? -38f : 38f;
+                        ExecuteKickTowards(match, enemy, new Vector2(-350f, targetY), powerSpeed: 360f, vz: 30f, isShot: true);
                     }
+                    // Si no, da un pase a un compañero desmarcado
                     else
                     {
-                        // PASE A UN COMPAÑERO LIBRE
                         var mate = awayPlayers.FirstOrDefault(p => p.Id != enemy.Id);
-                        if (mate != null && _random.Next(0, 100) < 30)
+                        if (mate != null)
                         {
-                            ExecuteKickTowards(match, enemy, mate.Position, 50f);
-                            _passCooldown = 0.8f;
+                            Vector2 matePos = new Vector2(mate.Position.X, mate.Position.Y);
+                            ExecuteKickTowards(match, enemy, matePos, powerSpeed: 250f, vz: 10f, isShot: false, passTarget: mate);
                         }
                     }
+
+                    _aiDecisionTimers[enemy.Id] = 0.6f;
                 }
             }
-            else if (enemy.Id == closestEnemy?.Id)
+            else if (enemy == closestEnemy)
             {
-                // Presión directa al balón
-                MovePlayerInternal(match, enemy, ballPos, deltaTime, 1.05f);
+                MovePlayerInternal(match, enemy, targetBallPos, deltaTime, 1.1f);
+                _aiDecisionTimers[enemy.Id] = 0.4f;
             }
             else
             {
-                // Posicionamiento en abanico táctico
                 float targetY = (enemy.ShirtNumber % 2 == 0) ? 70f : -70f;
-                float targetX = Math.Clamp(ballPos.X - 50f, -280f, 280f);
-                MovePlayerInternal(match, enemy, new Position(targetX, targetY), deltaTime, 0.65f);
+                float targetX = Math.Clamp(targetBallPos.X - 45f, -280f, 280f);
+                MovePlayerInternal(match, enemy, new Vector2(targetX, targetY), deltaTime, 0.7f);
             }
         }
 
-        // --- DESMARQUE DE COMPAÑEROS LOCALES (HUMANO) ---
-        foreach (var teammate in homePlayers.Where(p => p.Id != controlledPlayerId))
+        // --- DEFICIT Y RECUPERACIÓN DE COMPAÑEROS LOCALES (RIVER) ---
+        var closestHomePlayer = homePlayers.OrderBy(p => Vector2.Distance(new Vector2(p.Position.X, p.Position.Y), targetBallPos)).FirstOrDefault();
+
+        foreach (var teammate in homePlayers)
         {
-            float targetY = (teammate.ShirtNumber % 2 == 0) ? 80f : -80f;
-            float targetX = Math.Clamp(ballPos.X + 60f, -280f, 280f);
-            MovePlayerInternal(match, teammate, new Position(targetX, targetY), deltaTime, 0.65f);
+            if (teammate.Id == controlledPlayerId) continue; // Jugador controlado por el usuario
+
+            bool rivalHasBall = match.Ball.Owner != null && !SameTeam(match, teammate, match.Ball.Owner);
+            bool ballIsFree = match.Ball.Owner == null;
+
+            if (rivalHasBall || ballIsFree)
+            {
+                // El compañero más cercano sale a recuperar / presionar la pelota
+                if (teammate == closestHomePlayer)
+                {
+                    MovePlayerInternal(match, teammate, targetBallPos, deltaTime, 1.05f);
+                }
+                else
+                {
+                    // Cobertura defensiva de la zona central
+                    float targetY = (teammate.ShirtNumber % 2 == 0) ? 50f : -50f;
+                    float targetX = Math.Clamp(targetBallPos.X + 30f, -260f, 100f);
+                    MovePlayerInternal(match, teammate, new Vector2(targetX, targetY), deltaTime, 0.75f);
+                }
+            }
+            else
+            {
+                // Ataque: Acompañar el avance abriendo la cancha
+                float targetY = (teammate.ShirtNumber % 2 == 0) ? 75f : -75f;
+                float targetX = Math.Clamp(targetBallPos.X + 50f, -280f, 280f);
+                MovePlayerInternal(match, teammate, new Vector2(targetX, targetY), deltaTime, 0.75f);
+            }
         }
     }
 
-    private void MovePlayerInternal(Match match, Player player, Position target, float deltaTime, float speedFactor)
+    private void MovePlayerInternal(Match match, Player player, Vector2 target, float deltaTime, float speedFactor)
     {
         float dx = target.X - player.Position.X;
         float dy = target.Y - player.Position.Y;
@@ -284,34 +306,29 @@ public class MatchApplicationService
 
         if (dist > 3f)
         {
-            float dirX = dx / dist;
-            float dirY = dy / dist;
-            _playerFacingDir[player.Id] = new Position(dirX, dirY);
+            Vector2 dir = Vector2.Normalize(new Vector2(dx, dy));
+            _playerFacingDir[player.Id] = dir;
 
             float speed = player.Stats.Speed * 35f * speedFactor;
-            float nx = player.Position.X + (dirX * speed * deltaTime);
-            float ny = player.Position.Y + (dirY * speed * deltaTime);
+            float nx = player.Position.X + (dir.X * speed * deltaTime);
+            float ny = player.Position.Y + (dir.Y * speed * deltaTime);
 
             player.MoveTo(ClampToPitch(match, new Position(nx, ny)));
         }
     }
 
-    private void ExecuteKickTowards(Match match, Player kicker, Position target, float power)
+    private void ExecuteKickTowards(Match match, Player kicker, Vector2 target, float powerSpeed, float vz, bool isShot, Player? passTarget = null)
     {
-        float dx = target.X - kicker.Position.X;
-        float dy = target.Y - kicker.Position.Y;
-        float dist = MathF.Sqrt(dx * dx + dy * dy);
+        Vector2 kickerPos = new Vector2(kicker.Position.X, kicker.Position.Y);
+        Vector2 dir = target - kickerPos;
+        if (dir.LengthSquared() > 0f) dir = Vector2.Normalize(dir);
+        else dir = new Vector2(1f, 0f);
 
-        if (dist > 0f)
-        {
-            _possessorPlayerId = null;
-            _stolenFromPlayerId = kicker.Id;
-            _reStealImmunityTimer = 0.4f;
+        _playerFacingDir[kicker.Id] = dir;
 
-            _playerFacingDir[kicker.Id] = new Position(dx / dist, dy / dist);
-            match.Ball.ApplyImpulse((dx / dist) * power, (dy / dist) * power);
-            _soundService?.PlayKickSound();
-        }
+        BallState targetState = isShot ? BallState.InShot : BallState.InPass;
+        match.Ball.Release(kicker, dir * powerSpeed, vz, targetState, blockSeconds: 0.8f, passTarget: passTarget);
+        _soundService?.PlayKickSound();
     }
 
     public void MovePlayer(MovePlayerCommand command)
@@ -329,12 +346,12 @@ public class MatchApplicationService
 
         if (inputX != 0f || inputY != 0f)
         {
-            float len = MathF.Sqrt(inputX * inputX + inputY * inputY);
-            _playerFacingDir[player.Id] = new Position(inputX / len, inputY / len);
+            Vector2 dir = Vector2.Normalize(new Vector2(inputX, inputY));
+            _playerFacingDir[player.Id] = dir;
 
             float speed = player.Stats.Speed * 35f;
-            float newX = player.Position.X + (inputX / len * speed * 0.016f);
-            float newY = player.Position.Y + (inputY / len * speed * 0.016f);
+            float newX = player.Position.X + (dir.X * speed * 0.016f);
+            float newY = player.Position.Y + (dir.Y * speed * 0.016f);
 
             player.MoveTo(ClampToPitch(match, new Position(newX, newY)));
         }
@@ -348,36 +365,30 @@ public class MatchApplicationService
         var controlledPlayerId = GetClosestHomePlayerId(match);
         var player = match.HomeTeam.Players.FirstOrDefault(p => p.Id == controlledPlayerId);
 
-        if (player != null && (_possessorPlayerId == player.Id || player.Position.DistanceTo(match.Ball.Position) < 22f))
+        if (player != null && (match.Ball.Owner == player || Vector2.Distance(new Vector2(player.Position.X, player.Position.Y), match.Ball.Position) < 24f))
         {
-            float dirX = command.DirectionX;
-            float dirY = command.DirectionY;
+            float powerSpeed = Math.Clamp(command.Power * Ball.PowerToSpeed, 180f, 380f);
+            float vz = command.Power > 65f ? (command.Power - 65f) * 4f : 0f;
 
-            // Si es pase corto (fuerza < 50), busca automáticamente al compañero más cercano
             if (command.Power < 50f)
             {
                 var teammate = match.HomeTeam.Players
                     .Where(p => p.ShirtNumber != 1 && p.Id != player.Id)
-                    .OrderBy(p => p.Position.DistanceTo(player.Position))
+                    .OrderBy(p => Vector2.Distance(new Vector2(p.Position.X, p.Position.Y), new Vector2(player.Position.X, player.Position.Y)))
                     .FirstOrDefault();
 
                 if (teammate != null)
                 {
-                    ExecuteKickTowards(match, player, teammate.Position, 45f);
-                    _passCooldown = 0.35f;
+                    ExecuteKickTowards(match, player, new Vector2(teammate.Position.X, teammate.Position.Y), powerSpeed: 250f, vz: 10f, isShot: false, passTarget: teammate);
                     return;
                 }
             }
 
-            if (dirX == 0f && dirY == 0f)
-            {
-                dirX = 1f;
-                dirY = (_random.Next(0, 2) == 0) ? -0.2f : 0.2f;
-            }
+            Vector2 dir = new Vector2(command.DirectionX, command.DirectionY);
+            if (dir.X == 0f && dir.Y == 0f) dir = new Vector2(1f, (_random.Next(0, 2) == 0) ? -0.2f : 0.2f);
 
-            Position target = new Position(player.Position.X + dirX * 100f, player.Position.Y + dirY * 100f);
-            ExecuteKickTowards(match, player, target, command.Power);
-            _passCooldown = 0.35f;
+            Vector2 target = new Vector2(player.Position.X, player.Position.Y) + dir * 120f;
+            ExecuteKickTowards(match, player, target, powerSpeed, vz, isShot: true);
         }
     }
 
@@ -393,7 +404,7 @@ public class MatchApplicationService
     {
         return match.HomeTeam.Players
             .Where(p => p.ShirtNumber != 1)
-            .OrderBy(p => p.Position.DistanceTo(match.Ball.Position))
+            .OrderBy(p => Vector2.Distance(new Vector2(p.Position.X, p.Position.Y), match.Ball.PredictLanding()))
             .First().Id;
     }
 
@@ -402,6 +413,13 @@ public class MatchApplicationService
         float halfWidth = match.PitchWidth / 2f - 12f;
         float halfHeight = match.PitchHeight / 2f - 12f;
         return new Position(Math.Clamp(position.X, -halfWidth, halfWidth), Math.Clamp(position.Y, -halfHeight, halfHeight));
+    }
+
+    private static Vector2 ClampToPitchVector(Match match, Vector2 position)
+    {
+        float halfWidth = match.PitchWidth / 2f - 12f;
+        float halfHeight = match.PitchHeight / 2f - 12f;
+        return new Vector2(Math.Clamp(position.X, -halfWidth, halfWidth), Math.Clamp(position.Y, -halfHeight, halfHeight));
     }
 
     public MatchStatusDto? GetMatchStatus(Guid matchId)
@@ -427,6 +445,7 @@ public class MatchApplicationService
             match.ElapsedTimeInSeconds,
             match.Ball.Position.X,
             match.Ball.Position.Y,
+            match.Ball.Z,
             playersDto.AsReadOnly()
         );
     }
